@@ -21,6 +21,7 @@ No hardware modifictions where needed, just wire up, and start using it.
 * using RTC time, actual time surviving deep sleep (standard/buildin C libary)
 * Deep sleep (esp32/buildin libary)
 * Using RTC memory to store deep sleep persistent variabele  (esp32/buildin libary)
+* Creating a low priority for NTP updates in the background
 
 
 ## Costs
