@@ -31,6 +31,7 @@ A more compact version of the W5500 module costs $1 more at this time. (11/2018)
 
 ## remarks
 
+### lwIP
 The Ethernet module/libary is NOT integrated into the LWIP stack on the ESP32 currently, so you need to use the Ethernet libary functions. ESP32 native sntp is not usable for example, and the list is likely much longer.
 
 For LWIP support you may have a close look at:
@@ -41,6 +42,12 @@ and
 
 At the time of writing it seemed not ready for use yet, but progres is made.
 
+### NTP Update strategy
+
+As in the demo the deep sleep interval is set to 60 seconds, the NTP_UPDATE_INTERVAL is not triggered in this code, as the NTP is updated always at start-up or wake-up.
+Depending on your needs to most likely want to adjust that.
+* [Current]Always update NTP after boot/wake-up and wait for the next update interval (if that happens before another deep sleep)
+* Update at fixed times, and you mey even want to get awake for that.
 
 
 
