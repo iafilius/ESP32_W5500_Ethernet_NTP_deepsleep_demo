@@ -11,7 +11,7 @@ using NTP over ethernet, setting timezone, serial 2 network session bridge, keep
 
 No hardware modifictions where needed, just wire up, and start using it.
 
-## Concepts demod:
+## Concepts demo'd:
 
 * (S)NTP (Time over tcp/ip) (UTP/ethernet)   (Custom build packets) (Note: standard/building libary can be used when using WiFi instead Ethernet)
 * setting/getting systemtime   (standard/buildin C libary call's)
