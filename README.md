@@ -32,4 +32,14 @@ A more compact version of the W5500 module costs $1 more at this time. (11/2018)
 
 The Ethernet module/libary is NOT integrated into the LWIP stack on the ESP32 currently, so you need to use the Ethernet libary functions. ESP32 native sntp is not usable for example, and the list is likely much longer.
 
+For LWIP support you may have a close look at:
+
+[ESP8266 W5500lwIP](https://github.com/d-a-v/W5500lwIP)
+and
+[ESP32 W5500lwIP](https://github.com/johnnytolengo/w5500lwip)
+
+At the time of writing it seemed not ready for use yet, but progres is made.
+
+
+
 
