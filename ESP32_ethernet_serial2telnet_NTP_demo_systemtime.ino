@@ -1,5 +1,5 @@
 /*
-  Demo of a W5500 Ethernet module on ESP32 and a few concepts demo's:
+  Demo of a W5500 Ethernet module on ESP32 combined with a few concepts demo's:
   Hardware
   -ESP32 (Doitdev devkit v1)
   -W5500 based 10/100Mbps Wired/UTP Ethernet (not Wifi/LWIP)  (Ethernet(2) Libary)  (Not needed when using WiFI)
@@ -37,9 +37,17 @@
   https://platformio.org/lib/show/134/Ethernet/examples?file=LinkStatus.ino
   https://www.pjrc.com/teensy/td_libs_Ethernet.html
 
+  with ESP IDF 1.0.0 and 1.0.1-rc1 SPI.transfer() is missing, and a compile error is shown.
+  shortcut solution is shown at:
+  https://github.com/espressif/arduino-esp32/issues/1623
+  
   modified SPI.h with adding:
   vi ./AppData/Local/Arduino15/packages/esp32/hardware/esp32/1.0.0/libraries/SPI/src/SPI.h
     void transfer(uint8_t * data, uint32_t size) { transferBytes(data, data, size); }
+
+  Created a pull request #2136 for it to get it permanently fixed
+
+   
   See example SPI_Multgiple busses for pintout:
   initialise hspi with default pins
   SCLK = 14, MISO = 12, MOSI = 13, SS = 15
@@ -53,6 +61,16 @@
 #include <time.h>
 #include <sys/time.h>
 
+#include <WiFi.h>
+#ifndef WIFI_PASS
+#define WIFI_PASS "0123456789"
+#endif
+#ifndef WIFI_SSID
+#define WIFI_SSID  "FRITZ!Box guest access"
+#endif
+
+
+#define EthernetLinkUP_Retries  10  //
 
 IPAddress ip(192, 168, 1, 250);
 //IPAddress server(192, 168, 1, 200);
@@ -61,11 +79,21 @@ IPAddress server(194, 9, 85, 141); // CONNECT abc.nl:80 HTTP/1.1
 // with the IP address and port of the server
 // that you want to connect to (port 23 is default for telnet;
 // if you're using Processing's ChatServer, use port 10002):
+bool tcp_session = false;
 
-EthernetClient client;
+// Ethernet Socket based client example
+EthernetClient e_client;
 // Using GPIO port 4 for resetting W5500 at boot time
 #define W5500_RST_PORT   4
 byte mac[] = {  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+
+// WiFi socket based example client
+WiFiClient w_client;
+
+// Native ESP32 configTime/LWIP NTP, or custom
+// undef or define to make your choice.
+#define NATIVE_ESP32_LWIP_NTP
+//#undef NATIVE_ESP32_LWIP_NTP
 
 
 // NTP
@@ -73,17 +101,20 @@ unsigned int localPort = 8888;         // local port to listen for UDP packets
 char timeServer[] = "nl.pool.ntp.org"; // time.nist.gov NTP server
 const int NTP_PACKET_SIZE = 48;        // NTP time stamp is in the first 48 bytes of the message
 byte packetBuffer[ NTP_PACKET_SIZE];   //buffer to hold incoming and outgoing packets
-const int NTP_RETRY_NR=4;             // #nr of retries
-const int NTP_RETRY_INTERVAL=2000;   // time to wait between retries in ms
-const int NTP_UPDATE_INTERVAL=10000;   // Interval to start new update process 
+const int NTP_RETRY_NR = 4;           // #nr of retries
+const int NTP_RETRY_INTERVAL = 2000; // time to wait between retries in ms
+const int NTP_UPDATE_INTERVAL = 10000; // Interval to start new update process
 
 //https://www.freertos.org/RTOS-task-priority.html
 #define NTP_TASK_PRIO 1
 #define NTP_TASK_STACKSIZE  4096
 
+#define NTP_TZ  "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00"
+
 
 // A UDP instance to let us send and receive packets over UDP
 EthernetUDP Udp;
+bool EthernetUsable = false;  // W5500 found??
 
 
 // http://www.lucadentella.it/en/2017/05/11/esp32-17-sntp/
@@ -93,16 +124,22 @@ EthernetUDP Udp;
 // Deep sleep
 #define uS_TO_S_FACTOR 1000000  /* Conversion factor for micro seconds to seconds */
 #define TIME_TO_SLEEP  60        /* Time ESP32 will go to sleep (in seconds) */
+#define TIME_TO_SLEEP_AFTER_S 120000   // Start to sleep after # seconds uptime
 
 // RTC stored variabele
 RTC_DATA_ATTR int bootCount = 0;
 
 
+
+
+
+
 void setup() {
   bootCount = bootCount + 1;
+  //EthernetUsable = false;  // W5500 found??
 
   // Always set timezone, after boot or wake-up
-  setenv("TZ", "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00", 1);
+  setenv("TZ", NTP_TZ, 1);
   // man7.org/linux/man-pages/man3/tzset.3.html
   //setenv("TZ",":CET",1);
   tzset();
@@ -114,7 +151,7 @@ void setup() {
   Serial.print("bootCount: ");
   Serial.println(bootCount);
 
-  Serial.println("Printing time after boot/wake-up (which fails when not set for examplue due colt boot):");
+  Serial.println("Printing time after boot/wake-up (which fails when not set for example due colt boot):");
   printLocalTime();
 
 
@@ -153,6 +190,9 @@ void setup() {
 
   Serial.println("Starting ethernet");
   // https://www.arduino.cc/en/Reference/EthernetBegin
+  // Ethernet.begin takes about 60 seconds when cable is not connected ...... This is not always acceptable..
+  // https://stackoverflow.com/questions/8530102/ethernet-begin-blocks-for-60-seconds-if-theres-no-ethernet-cable
+  // DHCP seems to hold a 60 second timeout....
   Ethernet.begin(mac);
   //Ethernet.begin(mac,ip);
 
@@ -163,20 +203,19 @@ void setup() {
   switch (Ethernet.hardwareStatus()) {
     case EthernetNoHardware:
       Serial.println("Ethernet Hardware was not found, can't continue...");
-      while (true) {
-        //delay(1); // do nothing
-        vTaskDelay(1 / portTICK_RATE_MS);
-
-      }
+      EthernetUsable = false;
       break;
     case EthernetW5100:
       Serial.println("W5100 hardware found");
+      EthernetUsable = true;
       break;
     case EthernetW5200:
       Serial.println("W5200 hardware found");
+      EthernetUsable = true;
       break;
     case EthernetW5500:
       Serial.println("W5500 hardware found");
+      EthernetUsable = true;
       break;
     default:
       Serial.print("Undefined hardware found:");
@@ -184,11 +223,14 @@ void setup() {
 
       Serial.print("No Hardware value::");
       Serial.println(EthernetNoHardware);
+      EthernetUsable = false;  // not acceptable
 
       break;
   }
 
 
+
+  int retries = 0;
   do {
     //delay(500);
     vTaskDelay(500 / portTICK_RATE_MS);
@@ -196,103 +238,217 @@ void setup() {
     switch (Ethernet.linkStatus()) {
       case Unknown:
         Serial.println("Unknown link status");
+        EthernetUsable = false;
         break;
       case LinkOFF:
         Serial.println("LinkOFF");
+        EthernetUsable = false;
         break;
       case LinkON:
         Serial.println("LinkON");
+        EthernetUsable = true;
         break;
       default:
+        EthernetUsable = false;
         Serial.println("Undefined link status");
     }
-  } while (Ethernet.linkStatus() != LinkON);
+  } while ( (Ethernet.linkStatus() != LinkON ) && retries++ < EthernetLinkUP_Retries );
 
 
-  // https://www.pjrc.com/arduino-ethernet-library-2-0-0/
-  Serial.print("LocalIP:");
-  Serial.println(Ethernet.localIP());
+  if (EthernetUsable == true) {
+    // https://www.pjrc.com/arduino-ethernet-library-2-0-0/
+    Serial.print("LocalIP:");
+    Serial.println(Ethernet.localIP());
 
-  Serial.print("GW:");
-  Serial.println(Ethernet.gatewayIP());
+    Serial.print("GW:");
+    Serial.println(Ethernet.gatewayIP());
 
-  Serial.print("Subnet Netmask:");
-  Serial.println(Ethernet.subnetMask());
+    Serial.print("Subnet Netmask:");
+    Serial.println(Ethernet.subnetMask());
 
-  Serial.print("DNS Server IP:");
-  Serial.println(Ethernet.dnsServerIP());
+    Serial.print("DNS Server IP:");
+    Serial.println(Ethernet.dnsServerIP());
 
-  //Serial.print("MAC:");
-  //Serial.println(Ethernet.MACAddress());
+    //Serial.print("MAC:");
+    //Serial.println(Ethernet.MACAddress());
 
-  Udp.begin(localPort);
-
-  // give the Ethernet shield a second to initialize:
-  //delay(1000);
-
-  // Serial 2 network port bridge demo
-  Serial.print("connecting to ");
-  Serial.print(server);
-  Serial.println("...");
-  // if you get a connection, report back via serial:
-  if (client.connect(server, 80)) {
-    Serial.println("connected");
   } else {
-    // if you didn't get a connection to the server:
-    Serial.println("connection failed");
+
+    // WiFi fallback
+
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    Serial.println("");
+    Serial.println("WiFi connected.");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+
+    //*** WiFi
+  }
+
+  if (EthernetUsable == true) {
+    // ethernet/W5500 based connection setup
+
+    Udp.begin(localPort);
+
+    // give the Ethernet shield a second to initialize:
+    //delay(1000);
+
+    // Serial 2 network port bridge demo
+    Serial.print("[Ethernet] connecting to ");
+    Serial.print(server);
+    Serial.println("...");
+    // if you get a connection, report back via serial:
+    if (e_client.connect(server, 80)) {
+      Serial.println("connected");
+      tcp_session = true;
+    } else {
+      // if you didn't get a connection to the server:
+      Serial.println("connection failed");
+      tcp_session = false;
+    }
+  } else {
+    // WiFi/lwIP libary based connection setup
+    // Serial 2 network port bridge demo
+    Serial.print("[WiFi] connecting to ");
+    Serial.print(server);
+    Serial.println("...");
+    // if you get a connection, report back via serial:
+    if (w_client.connect(server, 80)) {
+      Serial.println("connected");
+      tcp_session = true;
+    } else {
+      // if you didn't get a connection to the server:
+      Serial.println("connection failed");
+      tcp_session = false;
+    }
+
   }
 
 
-  // Create task for NTP over Ethernet
-  // https://techtutorialsx.com/2017/05/06/esp32-arduino-creating-a-task/
-  xTaskCreate(&syncTime_Ethernet, "syncTime_Ethernet",NTP_TASK_STACKSIZE , NULL, NTP_TASK_PRIO, NULL);
 
+  if (EthernetUsable == true) {
+    // Ethernet/W550 stack
+    // Create task for NTP over Ethernet
+    // https://techtutorialsx.com/2017/05/06/esp32-arduino-creating-a-task/
+    xTaskCreate(&syncTime_Ethernet, "syncTime_Ethernet", NTP_TASK_STACKSIZE , NULL, NTP_TASK_PRIO, NULL);
+  } else {
+    // lwIP stack
+    //void configTime (long gmtOffset_sec, int daylightOffset_sec, const char * server1, const char * server2, const char * server3)
+    // https://www.esp8266.com/viewtopic.php?p=75120#p75120
+    //configTime(0, 0, timeServer);
+    configTzTime(NTP_TZ, timeServer);
+  }
+
+
+//Serial.print("EthernetUsable [1]: ");
+//Serial.println(EthernetUsable);
 }
 
+time_t elapsedTime, Previous_print_time;
 
 void loop() {
   // https://esp32.com/viewtopic.php?t=5398
+//Serial.print("EthernetUsable [2]: ");
+//Serial.println(EthernetUsable);
 
   // Get time using NTP
   //syncTime_Ethernet ();
 
 
-  // if there are incoming bytes available
-  // from the server, read them and print them:
-  if (client.available()) {
-    char c = client.read();
-    Serial.print(c);
-  }
-
-  // as long as there are bytes in the serial queue,
-  // read them and send them out the socket if it's open:
-  while (Serial.available() > 0) {
-    char inChar = Serial.read();
-    if (client.connected()) {
-      client.print(inChar);
+  if ((EthernetUsable == true) && (tcp_session == true)) {
+    // if there are incoming bytes available
+    // from the server, read them and print them:
+    while (e_client.available()) {
+      char c = e_client.read();
+      Serial.print(c);
     }
+
+    // as long as there are bytes in the serial queue,
+    // read them and send them out the socket if it's open:
+    while (Serial.available() > 0) {
+      char inChar = Serial.read();
+      if (e_client.connected()) {
+        e_client.print(inChar);
+      }
+    }
+
+    // if the server's disconnected, stop the e_client:
+    if (!e_client.connected()) {
+      Serial.println();
+      Serial.println("[Ethernet] disconnecting.");
+      e_client.stop();
+      tcp_session=false;
+      // do nothing:
+      //reconnect not recuired for demo.
+      /*    while (true) {
+            delay(1);
+          }
+      */
+    }
+//Serial.print("EthernetUsable [3]: ");
+//Serial.println(EthernetUsable);
+
   }
 
-  // if the server's disconnected, stop the client:
-  if (!client.connected()) {
-    Serial.println();
-    Serial.println("disconnecting.");
-    client.stop();
-    // do nothing:
-    /*    while (true) {
-          delay(1);
-        }
-    */
+
+  if ((EthernetUsable == false) && (tcp_session == true)) {
+    // Wifi Based connection handling/briding demo
+
+    // if there are incoming bytes available
+    // from the server, read them and print them:
+    while (w_client.available()) {
+      char c = w_client.read();
+      Serial.print(c);
+    }
+
+    // as long as there are bytes in the serial queue,
+    // read them and send them out the socket if it's open:
+    while (Serial.available() > 0) {
+      char inChar = Serial.read();
+      if (w_client.connected()) {
+        w_client.print(inChar);
+      }
+    }
+
+    // if the server's disconnected, stop the e_client:
+    if (!w_client.connected()) {
+
+//Serial.print("[WiFi]EthernetUsable [4]: ");
+//Serial.println(EthernetUsable);
+      Serial.println();
+      Serial.println("[WiFi] disconnecting.");
+      w_client.stop();
+      tcp_session=false;
+      // reconnect not recuired for demo.
+      // do nothing:
+      /*    while (true) {
+            delay(1);
+          }
+      */
+    }
+
+//Serial.print("EthernetUsable [5]: ");
+//Serial.println(EthernetUsable);
+
   }
-
-
 
   //delay(5000);
-  vTaskDelay(5000 / portTICK_RATE_MS);
+  vTaskDelay(100 / portTICK_RATE_MS);   // small delay to keep telnet demo interactive
 
-  printLocalTime();
+  // print current time, at a regular (slow) interval
+  elapsedTime = millis() - Previous_print_time;
+  if ( elapsedTime > 5000) {
+    printLocalTime();
+    Previous_print_time = millis();
+  }
 
-  if (millis() > 60000) {
+  if (millis() > TIME_TO_SLEEP_AFTER_S) {
     //Serial.print("millis:");
     //Serial.println(millis());
     Serial.println("Time to go asleep, until later again..");
@@ -306,14 +462,14 @@ void loop() {
 void syncTime_Ethernet(void *pvParameter) {
   static bool This_NTP_Update_Was_Successfull = false;
 
-  #define TAG __FUNCTION__
-  
+#define TAG __FUNCTION__
+
   //ESP_LOGI(TAG, "%s()", __FUNCTION__);  // function to demo time
 
   while (1)
   {
     int retry = 0;
-    
+
     while ((This_NTP_Update_Was_Successfull == false) && retry++ < NTP_RETRY_NR)
     {
       //This_NTP_Update_Was_Successfull=true;
@@ -380,7 +536,7 @@ void syncTime_Ethernet(void *pvParameter) {
 
           char str_buf[512];
           strftime(str_buf, sizeof(str_buf), "%A, %B %d %Y %H:%M:%S %F (%Z) weekday(sun): %u weeknumber(sun): %U weekday(mon): %w weeknumber(mon): %W TimeZoneOffset: %z ", &tm);
-          #define TAG __FUNCTION__
+#define TAG __FUNCTION__
           //ESP_LOGI(TAG, "Time set to %s", str_buf);  // function to demo time
 
           // code is writting in 2018, so year must be 2018 or greater, expecting not to go back in time any soon.
@@ -391,12 +547,12 @@ void syncTime_Ethernet(void *pvParameter) {
             This_NTP_Update_Was_Successfull = true;
           } else {
             ESP_LOGI(TAG, "Failed, invalid year %s", str_buf);  // function to demo time
-            } 
+          }
         }
 
 
       }
-    if(This_NTP_Update_Was_Successfull==false)
+      if (This_NTP_Update_Was_Successfull == false)
         vTaskDelay(NTP_RETRY_INTERVAL / portTICK_RATE_MS);    // retry timer
     }
 
@@ -410,32 +566,6 @@ void syncTime_Ethernet(void *pvParameter) {
 }
 
 
-
-
-
-// send an NTP request to the time server at the given address
-unsigned long sendNTPpacket(char* address)
-{
-  // set all bytes in the buffer to 0
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-  packetBuffer[1] = 0;     // Stratum, or type of clock
-  packetBuffer[2] = 6;     // Polling Interval
-  packetBuffer[3] = 0xEC;  // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  packetBuffer[12]  = 49;
-  packetBuffer[13]  = 0x4E;
-  packetBuffer[14]  = 49;
-  packetBuffer[15]  = 52;
-
-  // all NTP fields have been given values, now
-  // you can send a packet requesting a timestamp:
-  Udp.beginPacket(address, 123); //NTP requests are to port 123
-  Udp.write(packetBuffer, NTP_PACKET_SIZE);
-  Udp.endPacket();
-}
 
 
 
@@ -471,6 +601,33 @@ void printLocalTime()
     Serial.println(mktime(&timeinfo));
   */
 }
+
+
+
+// send an NTP request to the time server at the given address
+unsigned long sendNTPpacket(char* address)
+{
+  // set all bytes in the buffer to 0
+  memset(packetBuffer, 0, NTP_PACKET_SIZE);
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+  packetBuffer[1] = 0;     // Stratum, or type of clock
+  packetBuffer[2] = 6;     // Polling Interval
+  packetBuffer[3] = 0xEC;  // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  packetBuffer[12]  = 49;
+  packetBuffer[13]  = 0x4E;
+  packetBuffer[14]  = 49;
+  packetBuffer[15]  = 52;
+
+  // all NTP fields have been given values, now
+  // you can send a packet requesting a timestamp:
+  Udp.beginPacket(address, 123); //NTP requests are to port 123
+  Udp.write(packetBuffer, NTP_PACKET_SIZE);
+  Udp.endPacket();
+}
+
 
 
 
